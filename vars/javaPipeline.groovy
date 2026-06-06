@@ -1,126 +1,99 @@
-// Standard Enterprise Java Microservice Pipeline
-// Used by all Java teams at Citizens Bank
-// Maintained by DevOps Platform Team
-
-def call(Map config = [:]) {
-    // Default configuration
-    def defaults = [
-        sonarProjectKey: env.JOB_NAME,
-        nexusRepo: 'maven-releases',
-        skipTests: false,
-        runSecurityScans: true,
-        deployEnvironment: 'dev'
-    ]
+pipeline {
+    agent any
     
-    // Merge user config with defaults
-    def settings = defaults + config
+    tools {
+        maven 'Maven'
+    }
     
-    pipeline {
-        agent any
-        
-        tools {
-            maven 'Maven'
+    options {
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+    
+    environment {
+        APP_NAME = 'payment-service'
+    }
+    
+    stages {
+        stage('1. Checkout') {
+            steps {
+                checkout scm
+                echo "Building ${APP_NAME} #${env.BUILD_NUMBER}"
+            }
         }
         
-        options {
-            timestamps()
-            timeout(time: 30, unit: 'MINUTES')
-            buildDiscarder(logRotator(numToKeepStr: '10'))
-            disableConcurrentBuilds()
+        stage('2. Build') {
+            steps {
+                echo 'Compiling source code...'
+                sh 'mvn clean compile'
+            }
         }
         
-        environment {
-            APP_NAME = env.JOB_NAME
-            BUILD_VERSION = "1.0.${env.BUILD_NUMBER}"
+        stage('3. Unit Tests') {
+            steps {
+                echo 'Running unit tests...'
+                sh 'mvn test'
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
+                }
+            }
         }
         
-        stages {
-            stage('Checkout') {
-                steps {
-                    checkout scm
-                    echo "Building ${APP_NAME} #${BUILD_VERSION}"
-                }
-            }
-            
-            stage('Build') {
-                steps {
-                    echo 'Compiling source code...'
-                    sh 'mvn clean compile -DskipTests'
-                }
-            }
-            
-            stage('Unit Tests') {
-                when {
-                    expression { !settings.skipTests }
-                }
-                steps {
-                    sh 'mvn test'
-                }
-                post {
-                    always {
-                        junit allowEmptyResults: true,
-                             testResults: 'target/surefire-reports/*.xml'
-                    }
-                }
-            }
-            
-            stage('Security Scans') {
-                when {
-                    expression { settings.runSecurityScans }
-                }
-                parallel {
-                    stage('SonarQube SAST') {
-                        steps {
-                            echo "Scanning with SonarQube..."
-                            withSonarQubeEnv('SonarQube') {
-                                sh "mvn sonar:sonar -Dsonar.projectKey=${settings.sonarProjectKey}"
-                            }
+        stage('4. Parallel Security Scans') {
+            parallel {
+                stage('4a. SonarQube SAST') {
+                    steps {
+                        echo 'Running SonarQube code analysis...'
+                        withSonarQubeEnv('SonarQube') {
+                            sh 'mvn sonar:sonar'
                         }
-                    }
-                    
-                    stage('Trivy SCA') {
-                        steps {
-                            echo "Scanning dependencies with Trivy..."
-                            sh """
-                                trivy fs --severity HIGH,CRITICAL \
-                                  --format table \
-                                  --exit-code 1 \
-                                  pom.xml
-                            """
-                        }
+                        echo 'SonarQube analysis submitted. Check dashboard for results.'
                     }
                 }
-            }
-            
-            stage('Package') {
-                steps {
-                    sh 'mvn package -DskipTests'
-                    echo "Artifact: target/*.war"
-                }
-            }
-            
-            stage('Upload to Nexus') {
-                steps {
-                    echo "Uploading to ${settings.nexusRepo}..."
-                    sh 'mvn deploy -DskipTests'
-                }
-            }
-            
-            stage('Deploy') {
-                steps {
-                    echo "Deploying to ${settings.deployEnvironment}"
-                    echo "Deployment simulated - would deploy via Helm/K8s"
+                
+                stage('4b. Trivy SCA Scan') {
+                    steps {
+                        echo 'Scanning dependencies with Trivy...'
+                        sh '''
+                            trivy fs --severity HIGH,CRITICAL \
+                              --format table \
+                              --exit-code 1 \
+                              pom.xml
+                        '''
+                        echo 'Trivy scan complete - no critical vulnerabilities found'
+                    }
                 }
             }
         }
         
-        post {
-            success {
-                echo "✅ Pipeline SUCCESS: ${APP_NAME} ${BUILD_VERSION}"
+        stage('5. Package') {
+            steps {
+                echo 'Creating WAR file...'
+                sh 'mvn package -DskipTests'
+                echo 'Artifact created: target/payment-service-1.0.0.war'
             }
-            failure {
-                echo "❌ Pipeline FAILED: Check console"
+        }
+        
+        stage('6. Upload to Nexus') {
+            steps {
+                echo 'Uploading artifact to Nexus Repository...'
+                sh 'mvn deploy -DskipTests'
+                echo 'Artifact uploaded to Nexus'
             }
         }
     }
+    
+    post {
+        success {
+            echo "✅ PIPELINE SUCCESS"
+            echo "SonarQube: http://<EC2-IP>:9000/dashboard?id=payment-service"
+            echo "Nexus: http://<EC2-IP>:8081"
+        }
+        failure {
+            echo "❌ Pipeline FAILED"
+        }
+    }
 }
+
